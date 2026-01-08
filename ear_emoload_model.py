@@ -37,15 +37,13 @@ class TrainConfig:
     window: float = 4.0
     step: float = 2.0
 
-    # Model hyper-params
-    hid_channels: int = 40
-    depth: int = 6
-    heads: int = 10
+    # EarEmoLoad model hyper-params
+    f1: int = 16
+    d: int = 2
+    f2: int = 32
+    kernel_1: int = 64
+    kernel_2: int = 16
     dropout: float = 0.5
-    forward_expansion: int = 4
-    forward_dropout: float = 0.5
-    cls_channels: int = 32
-    cls_dropout: float = 0.5
 
     # Split
     val_ratio: float = 0.2
@@ -53,6 +51,81 @@ class TrainConfig:
     # Output
     run_root: str = "ear_emoload_runs"
     run_name: str = ""  # if empty -> auto timestamp
+
+
+class EarEmoLoadNet(nn.Module):
+    """
+    A lightweight ear-EEG classifier.
+
+    Input:  x of shape (B, C, T)
+    Output: logits of shape (B, num_classes)
+
+    The network uses temporal filtering + depthwise spatial filtering and global pooling,
+    so it works with arbitrary window length T.
+    """
+
+    def __init__(
+        self,
+        num_electrodes: int,
+        num_classes: int,
+        f1: int = 16,
+        d: int = 2,
+        f2: int = 32,
+        kernel_1: int = 64,
+        kernel_2: int = 16,
+        dropout: float = 0.5,
+    ):
+        super().__init__()
+        if num_electrodes <= 0:
+            raise ValueError(f"num_electrodes must be > 0, got {num_electrodes}")
+        if num_classes <= 1:
+            raise ValueError(f"num_classes must be > 1, got {num_classes}")
+
+        f1 = int(f1)
+        d = int(d)
+        f2 = int(f2)
+        kernel_1 = int(kernel_1)
+        kernel_2 = int(kernel_2)
+
+        self.num_electrodes = int(num_electrodes)
+        self.num_classes = int(num_classes)
+
+        # (B, 1, C, T)
+        self.temporal = nn.Sequential(
+            nn.Conv2d(1, f1, kernel_size=(1, kernel_1), padding=(0, kernel_1 // 2), bias=False),
+            nn.BatchNorm2d(f1),
+        )
+
+        # depthwise spatial conv over electrodes
+        self.spatial = nn.Sequential(
+            nn.Conv2d(f1, f1 * d, kernel_size=(self.num_electrodes, 1), groups=f1, bias=False),
+            nn.BatchNorm2d(f1 * d),
+            nn.ELU(inplace=True),
+            nn.Dropout(float(dropout)),
+        )
+
+        # separable temporal conv
+        self.separable = nn.Sequential(
+            nn.Conv2d(f1 * d, f1 * d, kernel_size=(1, kernel_2), padding=(0, kernel_2 // 2), groups=f1 * d, bias=False),
+            nn.Conv2d(f1 * d, f2, kernel_size=(1, 1), bias=False),
+            nn.BatchNorm2d(f2),
+            nn.ELU(inplace=True),
+            nn.Dropout(float(dropout)),
+        )
+
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Linear(f2, self.num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected input shape (B,C,T), got {tuple(x.shape)}")
+        x = x.unsqueeze(1)  # (B, 1, C, T)
+        x = self.temporal(x)
+        x = self.spatial(x)  # (B, f1*d, 1, T)
+        x = self.separable(x)  # (B, f2, 1, T)
+        x = self.pool(x)  # (B, f2, 1, 1)
+        x = x.flatten(1)  # (B, f2)
+        return self.classifier(x)
 
 
 def set_seed(seed: int) -> None:
@@ -171,43 +244,26 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
     return {"loss": float(total_loss / max(1, n)), "acc": float(correct / max(1, n)), "n": int(n)}
 
 
-def train_single_subject_conformer(dataset, cfg: TrainConfig) -> Dict[str, object]:
-    try:
-        from torcheeg.models import Conformer  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise ImportError(
-            "Missing dependency: torcheeg. Please install dependencies first "
-            "(see requirements-pip.txt / environment.yml)."
-        ) from e
-
+def train_single_subject_ear_emoload(dataset, cfg: TrainConfig) -> Dict[str, object]:
     set_seed(int(cfg.seed))
 
     device = torch.device("cuda" if (cfg.device == "cuda" and torch.cuda.is_available()) else "cpu")
     num_classes = _infer_num_classes(dataset)
     num_electrodes = _infer_num_electrodes(dataset)
 
-    if cfg.hid_channels % cfg.heads != 0:
-        for h in range(int(cfg.heads), 0, -1):
-            if cfg.hid_channels % h == 0:
-                cfg.heads = int(h)
-                break
-
     train_ds, val_ds, split_info = split_by_trial_stratified(dataset, val_ratio=cfg.val_ratio, seed=cfg.seed)
     train_loader = DataLoader(train_ds, batch_size=int(cfg.batch_size), shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=int(cfg.batch_size), shuffle=False, num_workers=0)
 
-    model = Conformer(
+    model = EarEmoLoadNet(
         num_electrodes=int(num_electrodes),
-        sampling_rate=float(cfg.sfreq),
-        hid_channels=int(cfg.hid_channels),
-        depth=int(cfg.depth),
-        heads=int(cfg.heads),
-        dropout=float(cfg.dropout),
-        forward_expansion=int(cfg.forward_expansion),
-        forward_dropout=float(cfg.forward_dropout),
-        cls_channels=int(cfg.cls_channels),
-        cls_dropout=float(cfg.cls_dropout),
         num_classes=int(num_classes),
+        f1=int(cfg.f1),
+        d=int(cfg.d),
+        f2=int(cfg.f2),
+        kernel_1=int(cfg.kernel_1),
+        kernel_2=int(cfg.kernel_2),
+        dropout=float(cfg.dropout),
     ).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=float(cfg.learning_rate), weight_decay=float(cfg.weight_decay))
