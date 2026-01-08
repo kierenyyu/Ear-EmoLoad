@@ -1,0 +1,13 @@
+numpy
+scipy
+pandas
+scikit-learn
+tqdm
+mne
+torch
+torchvision
+torchaudio
+einops
+torcheeg
+wandb
+

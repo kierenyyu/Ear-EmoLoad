@@ -1,0 +1,23 @@
+name: ear-emoload
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      # ---- scientific stack ----
+      - numpy
+      - scipy
+      - pandas
+      - scikit-learn
+      - tqdm
+      # ---- signal processing ----
+      - mne
+      # ---- models ----
+      - torch
+      - torchvision
+      - torchaudio
+      - einops
+      - torcheeg
+      # ---- logging ----
+      - wandb
