@@ -1,11 +1,5 @@
 ## ear-emoload
 
-Minimal **single-subject** EEG classification pipeline using **Conformer**.
-
-### Features
-- Conformer training only (single subject)
-- CSV → per-trial `.npy` exporter
-- Minimal artifacts: `best_model.pth`, `last_model.pth`, `metrics.json`, `config.json`
 
 ### Repository layout
 - `ear_emoload_build_data.py`: export trials from CSV to `.npy`
@@ -62,9 +56,4 @@ python ear_emoload.py --task emotion --subject 2 --window 4 --step 2 --sfreq 250
 Outputs are written to:
 
 `ear_emoload_runs/sub_{subject}/{task}/ear-emoload_.../`
-
-### Notes
-- This project intentionally removes cross-subject experiments and heavy visualizations (e.g., confusion matrices).
-- If you see an error like "Missing dependency: torcheeg", install dependencies via `requirements-pip.txt` or `environment.yml`.
-
 
