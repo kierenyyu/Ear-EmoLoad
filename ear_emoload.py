@@ -4,12 +4,12 @@ import argparse
 import os
 from pathlib import Path
 
-from ear_emoload_model import TrainConfig, train_single_subject_conformer
+from ear_emoload_model import TrainConfig, train_single_subject_ear_emoload
 from ear_emoload_dataset import EarEmoLoadFolderDataset, default_read_fn
 
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="ear-emoload: single-subject EEG classification with Conformer.")
+    ap = argparse.ArgumentParser(description="ear-emoload: single-subject ear-EEG classification (EarEmoLoadNet).")
 
     ap.add_argument("--task", type=str, default="emotion", choices=["emotion", "workload"], help="Task name")
     ap.add_argument("--subject", type=int, required=True, help="Single subject id (required)")
@@ -27,14 +27,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
     ap.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="Device")
 
-    ap.add_argument("--hid_channels", type=int, default=40)
-    ap.add_argument("--depth", type=int, default=6)
-    ap.add_argument("--heads", type=int, default=10)
-    ap.add_argument("--dropout", type=float, default=0.5)
-    ap.add_argument("--forward_expansion", type=int, default=4)
-    ap.add_argument("--forward_dropout", type=float, default=0.5)
-    ap.add_argument("--cls_channels", type=int, default=32)
-    ap.add_argument("--cls_dropout", type=float, default=0.5)
+    ap.add_argument("--f1", type=int, default=16, help="EarEmoLoadNet: temporal filter count")
+    ap.add_argument("--d", type=int, default=2, help="EarEmoLoadNet: depth multiplier")
+    ap.add_argument("--f2", type=int, default=32, help="EarEmoLoadNet: projection channels")
+    ap.add_argument("--kernel_1", type=int, default=64, help="EarEmoLoadNet: temporal kernel size (stage 1)")
+    ap.add_argument("--kernel_2", type=int, default=16, help="EarEmoLoadNet: temporal kernel size (stage 2)")
+    ap.add_argument("--dropout", type=float, default=0.5, help="Dropout rate")
 
     ap.add_argument("--run_root", type=str, default="ear_emoload_runs", help="Output root folder")
     ap.add_argument("--run_name", type=str, default="", help="Optional run name (default: auto timestamp)")
@@ -100,20 +98,18 @@ def main() -> None:
         sfreq=float(args.sfreq),
         window=float(args.window),
         step=float(args.step),
-        hid_channels=int(args.hid_channels),
-        depth=int(args.depth),
-        heads=int(args.heads),
+        f1=int(args.f1),
+        d=int(args.d),
+        f2=int(args.f2),
+        kernel_1=int(args.kernel_1),
+        kernel_2=int(args.kernel_2),
         dropout=float(args.dropout),
-        forward_expansion=int(args.forward_expansion),
-        forward_dropout=float(args.forward_dropout),
-        cls_channels=int(args.cls_channels),
-        cls_dropout=float(args.cls_dropout),
         val_ratio=float(args.val_ratio),
         run_root=str(args.run_root),
         run_name=str(args.run_name),
     )
 
-    out = train_single_subject_conformer(dataset, cfg)
+    out = train_single_subject_ear_emoload(dataset, cfg)
     print(f"[ear-emoload] done. run_dir={out['run_dir']}")
     print(f"[ear-emoload] best_model={out['best_model_path']} best={out['best']}")
 
