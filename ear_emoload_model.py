@@ -45,6 +45,45 @@ class TrainConfig:
     kernel_2: int = 16
     dropout: float = 0.5
 
+    # Model selection
+    # - ear_embed_cnn: original baseline (EarEmoLoadNet, single-task)
+    # - ear_embed_tf_attn: paper-matching Ear-Embed (CWT + ST-CNN + optional MHSA, multi-task)
+    model: str = "ear_embed_cnn"
+
+    # Multi-task loss weights (only used when dataset provides dict labels)
+    lambda_emo: float = 1.0
+    lambda_load: float = 1.0
+
+    # Ablations (only for ear_embed_tf_attn)
+    use_attention: bool = True
+    mask_band: str = "none"  # none|theta|alpha|beta
+
+    # CWT
+    cwt_f_min: float = 1.0
+    cwt_f_max: float = 50.0
+    cwt_n_freqs: int = 48
+    cwt_freqs_scale: str = "log"  # log|linear
+    cwt_morlet_w0: float = 6.0
+    cwt_out: str = "magnitude"  # magnitude|power
+
+    # ST-CNN
+    st_d1: int = 32
+    st_d2: int = 64
+    st_kt: int = 15
+    st_kf: int = 7
+    st_pool_t: int = 4
+    st_pool_f: int = 2
+    st_dropout: float = 0.1
+
+    # Attention / embedding
+    attn_num_layers: int = 2
+    attn_num_heads: int = 4
+    attn_mlp_ratio: float = 4.0
+    attn_dropout: float = 0.1
+    attn_attn_dropout: float = 0.1
+    emb_dim: int = 128
+    emb_l2_norm: bool = False
+
     # Split
     val_ratio: float = 0.2
 
@@ -234,40 +273,110 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
     n = 0
     for x, y in loader:
         x = x.to(device)
-        y = y.to(device).long()
-        logits = model(x)
-        loss = loss_fn(logits, y)
-        total_loss += float(loss.item()) * int(y.size(0))
-        pred = torch.argmax(logits, dim=1)
-        correct += int((pred == y).sum().item())
-        n += int(y.size(0))
+        bsz = int(x.size(0))
+        # y may be an int tensor (single-task) or a dict (multi-task)
+        if isinstance(y, dict):
+            # multi-task: y is dict of tensors
+            yt = {k: v.to(device).long() for k, v in y.items()}
+            out = model(x)
+            # prefer model-provided loss if present
+            if hasattr(model, "loss"):
+                loss = model.loss(out, yt)  # type: ignore[attr-defined]
+                # accuracy: report load accuracy as primary (stable 3-way)
+                pred = torch.argmax(out["load"], dim=1)
+                correct += int((pred == yt["load"]).sum().item())
+            else:  # pragma: no cover
+                raise RuntimeError("Multi-task model must implement .loss().")
+        else:
+            y = y.to(device).long()
+            logits = model(x)
+            loss = loss_fn(logits, y)
+            pred = torch.argmax(logits, dim=1)
+            correct += int((pred == y).sum().item())
+        total_loss += float(loss.item()) * bsz
+        n += bsz
     return {"loss": float(total_loss / max(1, n)), "acc": float(correct / max(1, n)), "n": int(n)}
+
+
+def build_model(dataset, cfg: TrainConfig) -> nn.Module:
+    """
+    Minimal model factory.
+    Keeps original baseline intact.
+    """
+    num_electrodes = _infer_num_electrodes(dataset)
+    if str(cfg.model).strip() in ("ear_embed_cnn", "ear_emoloadnet", "baseline"):
+        num_classes = _infer_num_classes(dataset)
+        return EarEmoLoadNet(
+            num_electrodes=int(num_electrodes),
+            num_classes=int(num_classes),
+            f1=int(cfg.f1),
+            d=int(cfg.d),
+            f2=int(cfg.f2),
+            kernel_1=int(cfg.kernel_1),
+            kernel_2=int(cfg.kernel_2),
+            dropout=float(cfg.dropout),
+        )
+
+    if str(cfg.model).strip() == "ear_embed_tf_attn":
+        from models.ear_embed_tf_attn import (  # local import to keep baseline deps simple
+            AttnConfig,
+            CWTConfig,
+            EarEmbedConfig,
+            EarEmbedMultiTask,
+            STCNNConfig,
+        )
+
+        mcfg = EarEmbedConfig(
+            lambda_emo=float(cfg.lambda_emo),
+            lambda_load=float(cfg.lambda_load),
+            use_attention=bool(cfg.use_attention),
+            mask_band=str(cfg.mask_band),
+            emb_dim=int(cfg.emb_dim),
+            l2_norm=bool(cfg.emb_l2_norm),
+            cwt=CWTConfig(
+                sfreq=float(cfg.sfreq),
+                f_min=float(cfg.cwt_f_min),
+                f_max=float(cfg.cwt_f_max),
+                n_freqs=int(cfg.cwt_n_freqs),
+                freqs_scale=str(cfg.cwt_freqs_scale),
+                morlet_w0=float(cfg.cwt_morlet_w0),
+                out=str(cfg.cwt_out),
+            ),
+            stcnn=STCNNConfig(
+                d1=int(cfg.st_d1),
+                d2=int(cfg.st_d2),
+                kt=int(cfg.st_kt),
+                kf=int(cfg.st_kf),
+                pool_t=int(cfg.st_pool_t),
+                pool_f=int(cfg.st_pool_f),
+                dropout=float(cfg.st_dropout),
+            ),
+            attn=AttnConfig(
+                num_layers=int(cfg.attn_num_layers),
+                num_heads=int(cfg.attn_num_heads),
+                mlp_ratio=float(cfg.attn_mlp_ratio),
+                dropout=float(cfg.attn_dropout),
+                attn_dropout=float(cfg.attn_attn_dropout),
+            ),
+        )
+        return EarEmbedMultiTask(num_electrodes=int(num_electrodes), cfg=mcfg)
+
+    raise ValueError(f"Unknown model={cfg.model!r}. Use ear_embed_cnn or ear_embed_tf_attn.")
 
 
 def train_single_subject_ear_emoload(dataset, cfg: TrainConfig) -> Dict[str, object]:
     set_seed(int(cfg.seed))
 
     device = torch.device("cuda" if (cfg.device == "cuda" and torch.cuda.is_available()) else "cpu")
-    num_classes = _infer_num_classes(dataset)
     num_electrodes = _infer_num_electrodes(dataset)
 
     train_ds, val_ds, split_info = split_by_trial_stratified(dataset, val_ratio=cfg.val_ratio, seed=cfg.seed)
     train_loader = DataLoader(train_ds, batch_size=int(cfg.batch_size), shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=int(cfg.batch_size), shuffle=False, num_workers=0)
 
-    model = EarEmoLoadNet(
-        num_electrodes=int(num_electrodes),
-        num_classes=int(num_classes),
-        f1=int(cfg.f1),
-        d=int(cfg.d),
-        f2=int(cfg.f2),
-        kernel_1=int(cfg.kernel_1),
-        kernel_2=int(cfg.kernel_2),
-        dropout=float(cfg.dropout),
-    ).to(device)
+    model = build_model(dataset, cfg).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=float(cfg.learning_rate), weight_decay=float(cfg.weight_decay))
-    loss_fn = nn.CrossEntropyLoss()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = cfg.run_name.strip() or f"ear-emoload_{cfg.task}_sub{cfg.subject}_seed{cfg.seed}_{ts}"
@@ -287,18 +396,30 @@ def train_single_subject_ear_emoload(dataset, cfg: TrainConfig) -> Dict[str, obj
 
         for x, y in train_loader:
             x = x.to(device)
-            y = y.to(device).long()
+            bsz = int(x.size(0))
 
             opt.zero_grad(set_to_none=True)
-            logits = model(x)
-            loss = loss_fn(logits, y)
+            # y may be single-task tensor or dict of tensors (multi-task)
+            if isinstance(y, dict):
+                yt = {k: v.to(device).long() for k, v in y.items()}
+                out = model(x)
+                if hasattr(model, "loss"):
+                    loss = model.loss(out, yt)  # type: ignore[attr-defined]
+                    pred = torch.argmax(out["load"], dim=1)
+                    correct += int((pred == yt["load"]).sum().item())
+                else:  # pragma: no cover
+                    raise RuntimeError("Multi-task model must implement .loss().")
+            else:
+                y = y.to(device).long()
+                logits = model(x)
+                loss = nn.CrossEntropyLoss()(logits, y)
+                pred = torch.argmax(logits, dim=1)
+                correct += int((pred == y).sum().item())
             loss.backward()
             opt.step()
 
-            total_loss += float(loss.item()) * int(y.size(0))
-            pred = torch.argmax(logits, dim=1)
-            correct += int((pred == y).sum().item())
-            n += int(y.size(0))
+            total_loss += float(loss.item()) * bsz
+            n += bsz
 
         train_loss = float(total_loss / max(1, n))
         train_acc = float(correct / max(1, n))
@@ -351,7 +472,6 @@ def train_single_subject_ear_emoload(dataset, cfg: TrainConfig) -> Dict[str, obj
         "best": best,
         "split": split_info,
         "elapsed_sec": elapsed,
-        "num_classes": int(num_classes),
         "num_electrodes": int(num_electrodes),
     }
 
